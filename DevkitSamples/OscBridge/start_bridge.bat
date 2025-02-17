@@ -9,7 +9,7 @@ taskkill /F /IM OscBridge.exe >nul 2>&1
 :: Set paths
 set "SCRIPT_DIR=%~dp0"
 set "PYTHON_SERVER=%SCRIPT_DIR%main.py"
-set "OSC_BRIDGE=%SCRIPT_DIR%bin\Release\net8.0-windows10.0.22621.0\win-x64\publish\OscBridge.exe"
+set "OSC_BRIDGE=%SCRIPT_DIR%bin\Release\net8.0-windows10.0.22621.0\win-x64\OscBridge.exe"
 
 echo Starting Datafeel OSC Bridge...
 echo.

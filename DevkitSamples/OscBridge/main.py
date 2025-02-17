@@ -131,22 +131,19 @@ async def index_handler(request):
     return web.FileResponse('monitor.html')
 
 async def try_create_osc_server(dispatcher, base_port=8001, max_attempts=5):
-    """Try to create OSC server on available port."""
+    loop = asyncio.get_event_loop()
     for port in range(base_port, base_port + max_attempts):
         try:
-            osc_server = AsyncIOOSCUDPServer(
-                ("127.0.0.1", port),
-                dispatcher,
-                asyncio.get_running_loop()
-            )
-            transport, protocol = await osc_server.create_serve_endpoint()
+            transport, protocol = await AsyncIOOSCUDPServer(
+                ('127.0.0.1', port), dispatcher, loop
+            ).create_serve_endpoint()
+            logger.warning(f"OSC server listening on port {port}")
             return transport, protocol, port
         except OSError as e:
             if port < base_port + max_attempts - 1:
                 logger.warning(f"Port {port} in use, trying next port...")
-                continue
-            raise e
-    raise RuntimeError("Could not find available port for OSC server")
+            else:
+                raise Exception(f"Could not find available port for OSC server: {e}")
 
 async def try_create_websocket_server(runner, base_port=8081, max_attempts=5):
     """Try to create WebSocket server on available port."""
@@ -172,39 +169,33 @@ async def main():
         
         # Set up OSC server
         dispatcher = Dispatcher()
-        dispatcher.set_default_handler(handle_osc_message)
-        
-        # Try to create OSC server with port retry
-        transport, protocol, osc_port = await try_create_osc_server(dispatcher)
+        dispatcher.map("/*", handle_osc_message)
+
+        # Create OSC server on port 8000 (no retries)
+        transport, protocol, osc_port = await try_create_osc_server(dispatcher, base_port=8000, max_attempts=1)
         
         # Set up HTTP/WebSocket server
         app = web.Application()
         app.router.add_get('/', index_handler)
         app.router.add_get('/ws', websocket_handler)
-        
-        # Configure CORS
-        app.router.add_options('/{tail:.*}', handle_options_request)
         app.on_response_prepare.append(on_prepare_response)
-        
+
+        # Start WebSocket server on port 8081 (no retries)
         runner = web.AppRunner(app)
         await runner.setup()
-        
-        # Try to create WebSocket server with port retry
-        site, ws_port = await try_create_websocket_server(runner)
-        
-        logger.warning("OSC Bridge started:")  
+        site, ws_port = await try_create_websocket_server(runner, base_port=8081, max_attempts=1)
+
+        logger.warning("OSC Bridge started:")
         logger.warning(f"  - OSC server listening on 127.0.0.1:{osc_port}")
         logger.warning(f"  - Web interface available at http://localhost:{ws_port}")
-        
-        # Open test.html in the default browser with the WebSocket port as a query parameter
-        test_html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test.html')
-        webbrowser.open(f'file://{test_html_path}?ws_port={ws_port}')
-        
-        # Main update loop
-        while True:
-            await process_pending_messages()  # Process any queued messages
-            await asyncio.sleep(MIN_UPDATE_INTERVAL)  # Wait for next frame
-            
+
+        # Open the monitor in the default browser
+        webbrowser.open(f'http://localhost:{ws_port}')
+
+        try:
+            await asyncio.Event().wait()  # run forever
+        finally:
+            await runner.cleanup()
     except KeyboardInterrupt:
         logger.info("Shutting down servers...")
     except Exception as e:
@@ -225,4 +216,8 @@ async def on_prepare_response(request, response):
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()

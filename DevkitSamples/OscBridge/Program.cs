@@ -34,6 +34,7 @@ class Program
         public byte Blue { get; set; }
         public float VibrationIntensity { get; set; }
         public float VibrationFrequency { get; set; }
+        public bool VibrationGo { get; set; }
         public bool IsDirty { get; set; }
     }
 
@@ -116,6 +117,12 @@ class Program
                         {
                             currentDot = devices.First();
                             LogMessage($"Selected device {currentDot.Address} as current device", ConsoleColor.Green);
+                            
+                            // Initialize state tracking for all devices
+                            foreach (var dot in manager.Dots)
+                            {
+                                dotStates[dot.Address] = new DotState();
+                            }
                         }
                         break;
                     }
@@ -145,24 +152,6 @@ class Program
             LogMessage("/datafeel/device/select <value>", ConsoleColor.White);
             LogMessage("/datafeel/device/reset", ConsoleColor.White);
             LogMessage("\nPress Ctrl+C to exit", ConsoleColor.Yellow);
-
-            // Initialize states for all dots
-            foreach (var dot in manager.Dots)
-            {
-                dotStates[dot.Address] = new DotState();
-                // Initialize device settings
-                dot.LedMode = LedModes.GlobalManual;
-                dot.VibrationMode = VibrationModes.Manual;
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                try
-                {
-                    await dot.Write(cts.Token);
-                }
-                catch (Exception ex)
-                {
-                    LogMessage($"Failed to initialize device {dot.Address}: {ex.Message}", ConsoleColor.Red);
-                }
-            }
 
             // Start message processing task
             _ = Task.Run(ProcessMessages);
@@ -386,14 +375,16 @@ class Program
                     return;
                 }
 
+                // Clamp intensity between 0 and 1
+                intensity = Math.Max(0, Math.Min(1, intensity));
                 LogMessage($"▶ Buffering Intensity: {intensity}", ConsoleColor.Cyan);
                 
                 lock (statesLock)
                 {
                     if (dotStates.TryGetValue(currentDot.Address, out var state))
                     {
-                        // Scale intensity from 0-1 to 0-100
                         state.VibrationIntensity = intensity * 100;
+                        state.VibrationGo = intensity > 0;  // Start vibration if intensity > 0
                         state.IsDirty = true;
                     }
                 }
@@ -406,13 +397,16 @@ class Program
                     return;
                 }
 
+                // Clamp frequency between 0 and 1
+                frequency = Math.Max(0, Math.Min(1, frequency));
                 LogMessage($"▶ Buffering Frequency: {frequency}", ConsoleColor.Cyan);
                 
                 lock (statesLock)
                 {
                     if (dotStates.TryGetValue(currentDot.Address, out var state))
                     {
-                        state.VibrationFrequency = frequency;
+                        // Scale frequency from 0-1 to 0-100 and ensure it's within valid range
+                        state.VibrationFrequency = frequency * 100;
                         state.IsDirty = true;
                     }
                 }
@@ -437,30 +431,51 @@ class Program
                 {
                     if (dotStates.TryGetValue(dot.Address, out var state) && state.IsDirty)
                     {
-                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
                         try
                         {
-                            // Apply buffered state
+                            // Set LED state
+                            dot.LedMode = LedModes.GlobalManual;
                             dot.GlobalLed.Red = state.Red;
                             dot.GlobalLed.Green = state.Green;
                             dot.GlobalLed.Blue = state.Blue;
-                            dot.VibrationIntensity = state.VibrationIntensity;
-                            dot.VibrationFrequency = state.VibrationFrequency;
+
+                            // Set vibration state
+                            if (state.VibrationGo)
+                            {
+                                // Use library mode for vibration
+                                dot.VibrationMode = VibrationModes.Library;
+                                dot.VibrationSequence[0].Waveforms = VibrationWaveforms.StrongBuzzP100;
+                                dot.VibrationSequence[1].Waveforms = VibrationWaveforms.EndSequence;
+                                dot.VibrationGo = true;
+                            }
+                            else
+                            {
+                                // Stop vibration
+                                dot.VibrationMode = VibrationModes.Manual;
+                                dot.VibrationIntensity = 0;
+                                dot.VibrationFrequency = 0;
+                            }
 
                             await dot.Write(cts.Token);
                             state.IsDirty = false;
-                            LogMessage($"Updated device {dot.Address}", ConsoleColor.DarkGreen);
+                            LogMessage($"Updated device {dot.Address} - Vibration: {(state.VibrationGo ? "ON" : "OFF")}", ConsoleColor.DarkGreen);
                         }
                         catch (OperationCanceledException)
                         {
                             LogMessage($"Update timed out for device {dot.Address}", ConsoleColor.Red);
                         }
+                        catch (Exception ex)
+                        {
+                            LogMessage($"Error updating device {dot.Address}: {ex.Message}", ConsoleColor.Red);
+                        }
                     }
                 }
 
-                // Calculate time to next frame
+                // Calculate time to next frame - aim for 30fps for device updates
                 var elapsed = DateTime.UtcNow - startTime;
-                var delay = frameInterval - elapsed;
+                var targetFrameTime = TimeSpan.FromMilliseconds(1000.0 / 30.0);
+                var delay = targetFrameTime - elapsed;
                 if (delay > TimeSpan.Zero)
                 {
                     await Task.Delay(delay);
@@ -469,7 +484,7 @@ class Program
             catch (Exception ex)
             {
                 LogMessage($"Error in update loop: {ex.Message}", ConsoleColor.Red);
-                await Task.Delay(frameInterval);
+                await Task.Delay(100); // Brief delay on error
             }
         }
     }
@@ -517,7 +532,7 @@ class Program
             Console.Write(new string(' ', Console.WindowWidth)); // Clear the line
             Console.SetCursorPosition(0, Console.WindowHeight - 2);
             Console.ForegroundColor = ConsoleColor.DarkCyan;
-            Console.Write($"Device {currentDot.Address} | RGB: ({currentDot.GlobalLed.Red}, {currentDot.GlobalLed.Green}, {currentDot.GlobalLed.Blue}) | Vibration: {currentDot.VibrationIntensity:F2} @ {currentDot.VibrationFrequency:F2}Hz");
+            Console.Write($"Device {currentDot.Address} | RGB: ({currentDot.GlobalLed.Red}, {currentDot.GlobalLed.Green}, {currentDot.GlobalLed.Blue}) | Vibration: {(dotStates[currentDot.Address].VibrationGo ? "ON" : "OFF")}");
             Console.ResetColor();
             Console.SetCursorPosition(0, currentPos);
         }

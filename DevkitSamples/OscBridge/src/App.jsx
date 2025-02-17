@@ -31,7 +31,7 @@ const getMessageColor = (address) => {
 
 function App() {
   const [messages, setMessages] = useState([])
-  const { lastJsonMessage } = useWebSocket('ws://localhost:3000/ws', {
+  const { lastJsonMessage } = useWebSocket('ws://localhost:8081/ws', {
     onMessage: () => {
       if (lastJsonMessage) {
         setMessages(prev => [...prev, lastJsonMessage].slice(-100))
