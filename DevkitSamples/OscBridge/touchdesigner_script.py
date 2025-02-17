@@ -1,14 +1,17 @@
 """
-TouchDesigner script for sending RGB values to OSC Bridge.
-Place this in text1 DAT and call it from a CHOP Execute DAT.
-Requires an OSC out DAT named 'oscout2' in the same component.
+TouchDesigner script for sending RGB and control values to OSC Bridge.
+Expects channels named:
+red_N, green_N, blue_N, frequency_N
+where N is the device number (1-4)
 """
 
 import time
+import json
 
-# Track last update time per device to prevent queue buildup
+# Configuration
+MAX_DEVICES = 4
+MIN_UPDATE_INTERVAL = 0.016  # 60fps
 last_update = {}
-MIN_UPDATE_INTERVAL = 0.033  # Match bridge's 30Hz rate
 
 def should_update(device_id):
     current_time = time.time()
@@ -18,6 +21,106 @@ def should_update(device_id):
         return True
     return False
 
+def update_debug_table(device_states):
+    debug_table = parent().op('debug_table')
+    if not debug_table:
+        return
+        
+    debug_table.clear()
+    debug_table.appendRow(['Device', 'Red', 'Green', 'Blue', 'Vibration', 'Frequency'])
+    
+    for device_id in range(1, MAX_DEVICES + 1):
+        state = device_states.get(str(device_id))
+        if state:
+            debug_table.appendRow([
+                device_id,
+                state['rgb'][0],
+                state['rgb'][1],
+                state['rgb'][2],
+                f"{state['vibration']:.3f}",
+                f"{state['frequency']:.3f}"
+            ])
+        else:
+            # Append empty row for missing devices
+            debug_table.appendRow([device_id, '-', '-', '-', '-', '-'])
+
+def collect_device_states(out1):
+    device_states = {}
+    
+    # Create a fast lookup for channel data
+    channel_map = {}
+    for i in range(out1.numChans):
+        chan = out1.chan(i)
+        channel_map[chan.name] = chan[0]
+    
+    # Process each device
+    for device_id in range(1, MAX_DEVICES + 1):
+        # Check if device exists by looking for red channel
+        red_name = f'red_{device_id}'
+        if red_name not in channel_map:
+            continue
+            
+        # Get RGB values
+        red_val = float(channel_map.get(red_name, 0))
+        green_val = float(channel_map.get(f'green_{device_id}', 0))
+        blue_val = float(channel_map.get(f'blue_{device_id}', 0))
+        freq_val = float(channel_map.get(f'frequency_{device_id}', 0))
+        
+        # Scale values
+        rgb = [
+            int(max(0, min(255, val)))  # Assume values are already in 0-255 range
+            for val in (red_val, green_val, blue_val)
+        ]
+        
+        # Store device state
+        device_states[str(device_id)] = {
+            'rgb': rgb,
+            'vibration': max(0, min(1, red_val / 255.0)),  # Normalize to 0-1
+            'frequency': max(0, min(1, freq_val / 255.0))  # Normalize to 0-1
+        }
+    
+    update_debug_table(device_states)
+    return device_states
+
+def onValueChange(channel, sampleIndex, val, prev):
+    oscout = parent().op('oscout2')
+    if not oscout:
+        return
+
+    out1 = parent().op('out1')
+    if not out1:
+        return
+
+    try:
+        # Extract device ID from channel name
+        parts = channel.name.split('_')
+        if len(parts) != 2 or not parts[1].isdigit():
+            return
+            
+        device_id = int(parts[1])
+        if device_id < 1 or device_id > MAX_DEVICES:
+            return
+        
+        # Rate limit updates
+        if not should_update(device_id):
+            return
+
+        # Collect and send states
+        device_states = collect_device_states(out1)
+        if device_states:
+            oscout.par.port = 9001
+            oscout.par.address = "127.0.0.1"
+            
+            batch_msg = {
+                'timestamp': time.time(),
+                'devices': device_states
+            }
+            
+            oscout.sendOSC('/datafeel/batch_update', [json.dumps(batch_msg)])
+            
+    except Exception:
+        pass  # Silently handle errors
+
 def onOffToOn(channel, sampleIndex, val, prev):
     pass
 
@@ -26,83 +129,3 @@ def whileOn(channel, sampleIndex, val):
 
 def onOnToOff(channel, sampleIndex, val, prev):
     pass
-
-def onValueChange(channel, sampleIndex, val, prev):
-    print(f"\n[TD->OSC] Channel '{channel.name}' changed: {prev:.3f} -> {val:.3f}")
-    
-    # Get the OSCout DAT
-    oscout = parent().op('oscout2')
-    if not oscout:
-        print("[TD->OSC] Error: Cannot find OSCout DAT named 'oscout2'")
-        return
-
-    # Configure OSC parameters for the bridge
-    oscout.par.address = "127.0.0.1"  # Host address
-    oscout.par.port = 9001  # Bridge listens on port 9001
-
-    try:
-        # Parse channel name format: <type>_<device_id>
-        channel_type, device_id = channel.name.split('_')
-        device_id = int(device_id)
-        print(f"[TD->OSC] Parsed channel: type={channel_type}, device={device_id}")
-    except ValueError:
-        print(f"[TD->OSC] Error: Invalid channel name format: {channel.name}")
-        print("Channel names should be in format: <type>_<device_id> (e.g., red_1)")
-        return
-
-    # First select the device
-    print(f"[TD->OSC] Selecting device {device_id}")
-    oscout.sendOSC('/datafeel/device/select', [float(device_id)])
-
-    # Get the output CHOP
-    out1 = parent().op('out1')
-    if not out1:
-        print("[TD->OSC] Error: Cannot find CHOP named 'out1'")
-        return
-
-    # Handle different types of messages
-    if channel_type in ['red', 'green', 'blue']:
-        try:
-            # Get current RGB values for this specific device
-            current_red = float(out1[f'red_{device_id}'][0])
-            current_green = float(out1[f'green_{device_id}'][0])
-            current_blue = float(out1[f'blue_{device_id}'][0])
-            
-            print(f"[TD->OSC] Raw RGB values: {current_red:.3f}, {current_green:.3f}, {current_blue:.3f}")
-
-            # Scale values from 0-1 to 0-255
-            rgb_values = [
-                int(current_red * 255),
-                int(current_green * 255),
-                int(current_blue * 255)
-            ]
-            
-            # Update the changed value
-            if channel_type == 'red':
-                rgb_values[0] = int(val * 255)
-            elif channel_type == 'green':
-                rgb_values[1] = int(val * 255)
-            elif channel_type == 'blue':
-                rgb_values[2] = int(val * 255)
-
-            # Clamp values to 0-255 range
-            rgb_values = [max(0, min(255, v)) for v in rgb_values]
-            
-            print(f"[TD->OSC] Sending RGB: {rgb_values}")
-            oscout.sendOSC('/datafeel/led/rgb', rgb_values)
-
-            # If this is a red channel update, also update vibration
-            if channel_type == 'red':
-                vibration = val  # Already in 0-1 range
-                print(f"[TD->OSC] Sending vibration intensity: {vibration:.3f}")
-                oscout.sendOSC('/datafeel/vibration/intensity', [vibration])
-
-        except Exception as e:
-            print(f"[TD->OSC] Error processing RGB values: {str(e)}")
-            return
-
-    elif channel_type == 'frequency':
-        # Ensure frequency is in 0-1 range
-        frequency = max(0, min(1, float(val)))
-        print(f"[TD->OSC] Sending frequency: {frequency:.3f}")
-        oscout.sendOSC('/datafeel/vibration/frequency', [frequency])
