@@ -18,7 +18,7 @@ class Program
     private static CancellationTokenSource? updateLoopCts;
     private static readonly Dictionary<int, DotState> dotStates = new();
     private static readonly object statesLock = new();
-    private static readonly TimeSpan frameInterval = TimeSpan.FromSeconds(1.0 / 60.0); // 60 FPS
+    private static TimeSpan frameInterval = TimeSpan.FromSeconds(1.0 / 60.0); // 60 FPS
     private static readonly TimeSpan deviceTimeout = TimeSpan.FromMilliseconds(250);
     private static readonly ConcurrentQueue<OscPacket> messageQueue = new();
     private static readonly SemaphoreSlim processingThrottle = new(1);
@@ -55,9 +55,6 @@ class Program
 
     static async Task Main(string[] args)
     {
-        Console.Title = "Datafeel OSC Bridge";
-        PrintHeader();
-
         try
         {
             Console.CancelKeyPress += (s, e) =>
@@ -66,45 +63,26 @@ class Program
                 isRunning = false;
             };
 
-            // Initialize Datafeel manager
-            LogMessage("Initializing Datafeel devices...", ConsoleColor.Yellow);
-            
-            // List available COM ports
             var ports = System.IO.Ports.SerialPort.GetPortNames();
-            LogMessage("Available COM ports:", ConsoleColor.Yellow);
             if (ports.Length == 0)
             {
-                LogMessage("No COM ports found! Please ensure your Datafeel device is connected.", ConsoleColor.Red);
+                Console.WriteLine("No COM ports found!");
                 return;
             }
 
-            foreach (var port in ports)
-            {
-                LogMessage($"  - {port}", ConsoleColor.White);
-            }
-            LogMessage("", ConsoleColor.White);
-
-            // Try each COM port
             bool connected = false;
             foreach (var port in ports)
             {
                 try
                 {
-                    LogMessage($"Trying port {port}...", ConsoleColor.Yellow);
-                    
-                    // Create the client first
                     var serialClient = new DatafeelModbusClientConfiguration()
                         .UseWindowsSerialPortTransceiver()
                         .CreateClient();
-
-                    // Open the client connection with retry
-                    LogMessage($"Opening serial connection on {port}...", ConsoleColor.Yellow);
-                    await RetryOperation(async () => 
+                    await RetryOperation(async () =>
                     {
                         await serialClient.Open();
                     }, maxRetries: 3);
-                    
-                    // Create and configure the manager
+
                     manager = new DotManagerConfiguration()
                         .AddDot<Dot_63x_xxx>(1)
                         .AddDot<Dot_63x_xxx>(2)
@@ -112,76 +90,39 @@ class Program
                         .AddDot<Dot_63x_xxx>(4)
                         .CreateDotManager();
 
-                    LogMessage($"Attempting to connect to Datafeel devices on {port}...", ConsoleColor.Yellow);
                     bool result = false;
                     using var cts = new CancellationTokenSource(CONNECTION_TIMEOUT);
                     result = await manager.Start(new List<DatafeelModbusClient> { serialClient }, cts.Token);
-                    
                     if (result)
                     {
                         connected = true;
-                        LogMessage($"Successfully connected on port {port}!", ConsoleColor.Green);
-                        
-                        // Set the first available device as current
-                        var devices = manager.Dots;
-                        if (devices.Any())
+                        foreach (var dot in manager.Dots)
                         {
-                            var currentDot = devices.First();
-                            LogMessage($"Selected device {currentDot.Address} as current device", ConsoleColor.Green);
-                            
-                            // Initialize state tracking for all devices
-                            foreach (var dot in manager.Dots)
-                            {
-                                dotStates[dot.Address] = new DotState();
-                            }
+                            dotStates[dot.Address] = new DotState();
                         }
                         break;
                     }
                 }
                 catch (Exception ex)
                 {
-                    LogMessage($"Failed to connect on {port}: {ex.Message}", ConsoleColor.Yellow);
+                    Console.WriteLine($"Failed to connect on {port}: {ex.Message}");
                     continue;
                 }
             }
 
             if (!connected)
             {
-                LogMessage("Failed to connect to any Datafeel devices. Please check:", ConsoleColor.Red);
-                LogMessage("1. Are the devices connected via USB?", ConsoleColor.Red);
-                LogMessage("2. Do you have permission to access the COM ports?", ConsoleColor.Red);
-                LogMessage("3. Is the correct driver installed?", ConsoleColor.Red);
+                Console.WriteLine("Failed to connect to any Datafeel devices.");
                 return;
             }
 
             InitializeOsc();
 
-            LogMessage("Supported messages:", ConsoleColor.Yellow);
-            LogMessage("/datafeel/led/rgb <r> <g> <b>", ConsoleColor.White);
-            LogMessage("/datafeel/vibration/intensity <value>", ConsoleColor.White);
-            LogMessage("/datafeel/vibration/frequency <value>", ConsoleColor.White);
-            LogMessage("/datafeel/device/select <value>", ConsoleColor.White);
-            LogMessage("/datafeel/device/reset", ConsoleColor.White);
-            LogMessage("/datafeel/batch_update <json>", ConsoleColor.White);
-            LogMessage("\nPress Ctrl+C to exit", ConsoleColor.Yellow);
-
-            // Start device update loop
             updateLoopCts = new CancellationTokenSource();
             updateLoop = StartDeviceUpdateLoop();
 
-            // Start message processing task
             _ = Task.Run(ProcessMessages);
 
-            // Start status update task
-            _ = Task.Run(async () => {
-                while (isRunning)
-                {
-                    PrintStatus();
-                    await Task.Delay(500); // Update every 500ms
-                }
-            });
-
-            // Keep the application running
             while (isRunning)
             {
                 await Task.Delay(100);
@@ -189,11 +130,10 @@ class Program
         }
         catch (Exception ex)
         {
-            LogMessage($"Unexpected error: {ex.Message}", ConsoleColor.Red);
+            Console.WriteLine($"Unexpected error: {ex.Message}");
         }
         finally
         {
-            // Cleanup
             isRunning = false;
             await Cleanup();
         }
@@ -209,7 +149,6 @@ class Program
             }
             catch (Exception ex)
             {
-                LogMessage($"Error closing OSC receiver: {ex.Message}", ConsoleColor.Red);
             }
         }
 
@@ -221,7 +160,6 @@ class Program
             }
             catch (Exception ex)
             {
-                LogMessage($"Error stopping manager: {ex.Message}", ConsoleColor.Red);
             }
         }
     }
@@ -232,15 +170,13 @@ class Program
         {
             try
             {
-                // Add timeout to the receive operation
-                var receiveTask = Task.Run(() => 
+                var receiveTask = Task.Run(() =>
                 {
-                    try 
+                    try
                     {
-                        // Check if we can receive
                         if (oscReceiver.State != OscSocketState.Connected)
                             return null;
-                            
+
                         return oscReceiver.Receive();
                     }
                     catch (SocketException)
@@ -249,7 +185,6 @@ class Program
                     }
                 });
 
-                // Wait for receive with timeout
                 if (await Task.WhenAny(receiveTask, Task.Delay(100)) == receiveTask)
                 {
                     var packet = await receiveTask;
@@ -262,15 +197,13 @@ class Program
             }
             catch (Exception ex)
             {
-                LogMessage($"Error receiving message: {ex.Message}", ConsoleColor.Red);
-                await Task.Delay(100);
             }
         }
     }
 
     private static async Task ProcessMessageQueue()
     {
-        if (!await processingThrottle.WaitAsync(1)) // Use very short timeout
+        if (!await processingThrottle.WaitAsync(1))
             return;
 
         try
@@ -283,14 +216,11 @@ class Program
 
             lastMessageProcessed = now;
 
-            // Drop messages if queue gets too large to prevent memory issues
             while (messageQueue.Count > MAX_QUEUE_SIZE)
             {
                 messageQueue.TryDequeue(out _);
-                LogMessage("Warning: Message queue overflow, dropping old messages", ConsoleColor.Yellow);
             }
 
-            // Process all pending messages
             while (messageQueue.TryDequeue(out var packet))
             {
                 try
@@ -312,7 +242,6 @@ class Program
                 }
                 catch (Exception ex)
                 {
-                    LogMessage($"Error processing message: {ex.Message}", ConsoleColor.Red);
                 }
             }
         }
@@ -328,92 +257,26 @@ class Program
 
         try
         {
-            // Log all incoming messages
-            LogMessage($"Received OSC message: {message.Address} with {message.Count} arguments", ConsoleColor.Yellow);
-
             if (message.Address == "/datafeel/batch_update" && message.Count >= 1)
             {
                 var jsonData = message[0].ToString();
                 if (jsonData == null)
                 {
-                    LogMessage("Invalid JSON data received", ConsoleColor.Red);
                     return;
                 }
 
-                LogMessage($"Received JSON: {jsonData}", ConsoleColor.Yellow);
-
-                try 
-                {
-                    var options = new JsonSerializerOptions
-                    {
-                        PropertyNameCaseInsensitive = true
-                    };
-
-                    var batchUpdate = JsonSerializer.Deserialize<BatchUpdate>(jsonData, options);
-                    
-                    if (batchUpdate?.Devices == null)
-                    {
-                        LogMessage("Invalid batch update format", ConsoleColor.Red);
-                        return;
-                    }
-
-                    LogMessage($"Parsed {batchUpdate.Devices.Count} device updates", ConsoleColor.Green);
-
-                    // Update device states
-                    lock (statesLock)
-                    {
-                        foreach (var deviceKvp in batchUpdate.Devices)
-                        {
-                            if (!int.TryParse(deviceKvp.Key, out int deviceId))
-                            {
-                                LogMessage($"Invalid device ID: {deviceKvp.Key}", ConsoleColor.Red);
-                                continue;
-                            }
-
-                            var state = deviceKvp.Value;
-                            LogMessage($"Device {deviceId}: RGB({state.RGB[0]}, {state.RGB[1]}, {state.RGB[2]}) Vib:{state.Vibration:F2} Freq:{state.Frequency:F2}", ConsoleColor.Cyan);
-                            
-                            // Get or create device state
-                            if (!dotStates.TryGetValue(deviceId, out var dotState))
-                            {
-                                dotState = new DotState();
-                                dotStates[deviceId] = dotState;
-                            }
-
-                            // Update state
-                            dotState.RGB[0] = (byte)state.RGB[0];
-                            dotState.RGB[1] = (byte)state.RGB[1];
-                            dotState.RGB[2] = (byte)state.RGB[2];
-                            dotState.Vibration = state.Vibration;
-                            dotState.Frequency = state.Frequency;
-                            dotState.UpdatePending = true;
-                        }
-                    }
-                }
-                catch (JsonException ex)
-                {
-                    LogMessage($"JSON parsing error: {ex.Message}", ConsoleColor.Red);
-                    LogMessage($"Raw JSON: {jsonData}", ConsoleColor.Yellow);
-                }
-                catch (Exception ex)
-                {
-                    LogMessage($"Error processing batch update: {ex.Message}", ConsoleColor.Red);
-                }
+                await ProcessBatchUpdate(jsonData);
             }
             else if (message.Address == "/datafeel/device/select" && message.Count >= 1)
             {
                 if (!int.TryParse(message[0].ToString(), out int deviceId))
                 {
-                    LogMessage("Invalid device ID received", ConsoleColor.Red);
                     return;
                 }
 
-                LogMessage($" Selecting device: {deviceId}", ConsoleColor.Cyan);
-                
                 var newDot = manager.Dots.FirstOrDefault(d => d.Address == deviceId);
                 if (newDot != null)
                 {
-                    // Make sure we have a state object for this device
                     lock (statesLock)
                     {
                         if (!dotStates.ContainsKey(deviceId))
@@ -424,27 +287,21 @@ class Program
                 }
                 else
                 {
-                    LogMessage($"Device {deviceId} not found", ConsoleColor.Red);
                 }
             }
             else if (message.Address == "/datafeel/led/rgb" && message.Count >= 3)
             {
-                // Parse RGB values safely - expecting floating point values
                 if (!float.TryParse(message[0].ToString(), out float r) ||
                     !float.TryParse(message[1].ToString(), out float g) ||
                     !float.TryParse(message[2].ToString(), out float b))
                 {
-                    LogMessage("Invalid RGB values received", ConsoleColor.Red);
                     return;
                 }
 
-                // Round and clamp values to 0-255 range
                 byte rByte = (byte)Math.Round(Math.Max(0, Math.Min(255, r)));
                 byte gByte = (byte)Math.Round(Math.Max(0, Math.Min(255, g)));
                 byte bByte = (byte)Math.Round(Math.Max(0, Math.Min(255, b)));
 
-                LogMessage($" Setting RGB: {rByte}, {gByte}, {bByte}", ConsoleColor.Cyan);
-                
                 lock (statesLock)
                 {
                     foreach (var state in dotStates.Values)
@@ -460,14 +317,11 @@ class Program
             {
                 if (!float.TryParse(message[0].ToString(), out float intensity))
                 {
-                    LogMessage("Invalid intensity value received", ConsoleColor.Red);
                     return;
                 }
 
-                // Clamp intensity between 0 and 1
                 intensity = Math.Max(0, Math.Min(1, intensity));
-                LogMessage($" Setting Intensity: {intensity}", ConsoleColor.Cyan);
-                
+
                 lock (statesLock)
                 {
                     foreach (var state in dotStates.Values)
@@ -481,14 +335,11 @@ class Program
             {
                 if (!float.TryParse(message[0].ToString(), out float frequency))
                 {
-                    LogMessage("Invalid frequency value received", ConsoleColor.Red);
                     return;
                 }
 
-                // Clamp frequency between 0 and 1
                 frequency = Math.Max(0, Math.Min(1, frequency));
-                LogMessage($" Setting Frequency: {frequency}", ConsoleColor.Cyan);
-                
+
                 lock (statesLock)
                 {
                     foreach (var state in dotStates.Values)
@@ -501,145 +352,113 @@ class Program
         }
         catch (Exception ex)
         {
-            LogMessage($"Error processing OSC message: {ex.Message}", ConsoleColor.Red);
         }
     }
 
     private static async Task StartDeviceUpdateLoop()
     {
-        while (!updateLoopCts?.Token.IsCancellationRequested ?? true)
+        if (manager == null) return;
+
+        while (isRunning)
         {
             try
             {
-                var updateTasks = new List<Task>();
-                var currentTime = DateTime.Now;
+                var updatedDots = new List<ManagedDot>();
 
-                // Process all pending device updates
                 lock (statesLock)
                 {
-                    foreach (var kvp in dotStates)
+                    foreach (var dot in manager.Dots)
                     {
-                        var deviceId = kvp.Key;
-                        var state = kvp.Value;
-
-                        // Skip if no update is pending or device was recently updated
-                        if (!state.UpdatePending || (currentTime - state.LastUpdate) < frameInterval)
-                            continue;
-
-                        var dot = manager?.Dots.FirstOrDefault(d => d.Address == deviceId);
-                        if (dot == null) continue;
-
-                        // Create update task for this device
-                        updateTasks.Add(Task.Run(async () =>
+                        if (dotStates.TryGetValue(dot.Address, out var state) && state.UpdatePending)
                         {
-                            try
-                            {
-                                using var cts = new CancellationTokenSource(deviceTimeout);
-
-                                // Set LED state
-                                dot.LedMode = LedModes.GlobalManual;
-                                dot.GlobalLed.Red = state.RGB[0];
-                                dot.GlobalLed.Green = state.RGB[1];
-                                dot.GlobalLed.Blue = state.RGB[2];
-
-                                // Set vibration state
-                                dot.VibrationMode = VibrationModes.Manual;
-                                dot.VibrationIntensity = state.Vibration * 100; // Scale to 0-100
-                                dot.VibrationFrequency = state.Frequency * 100; // Scale to 0-100
-
-                                // Write changes with fire-and-forget for better performance
-                                await dot.Write(true, cts.Token);
-
-                                // Mark update as processed
-                                lock (statesLock)
-                                {
-                                    state.UpdatePending = false;
-                                    state.LastUpdate = DateTime.Now;
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                LogMessage($"Error updating device {deviceId}: {ex.Message}", ConsoleColor.Red);
-                            }
-                        }));
+                            dot.LedMode = LedModes.GlobalManual;
+                            dot.GlobalLed.Red = state.RGB[0];
+                            dot.GlobalLed.Green = state.RGB[1];
+                            dot.GlobalLed.Blue = state.RGB[2];
+                            state.UpdatePending = false;
+                            updatedDots.Add(dot);
+                        }
                     }
                 }
 
-                // Wait for all device updates to complete
-                if (updateTasks.Count > 0)
+                // Only update dots that changed
+                foreach (var dot in updatedDots)
                 {
-                    await Task.WhenAll(updateTasks);
+                    try
+                    {
+                        await manager.Write(dot, fireAndForget: true);
+                        await Task.Delay(20); // Increased delay between writes
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error updating dot {dot.Address}: {ex.Message}");
+                        await Task.Delay(100); // Longer delay on error
+                    }
                 }
 
-                // Small delay to prevent CPU thrashing
-                await Task.Delay(1);
+                await Task.Delay(frameInterval);
             }
             catch (Exception ex)
             {
-                LogMessage($"Error in update loop: {ex.Message}", ConsoleColor.Red);
-                await Task.Delay(100); // Longer delay on error
+                Console.WriteLine($"Error in device update loop: {ex.Message}");
+                await Task.Delay(100); // Recovery delay
             }
         }
     }
 
-    private static async Task RetryOperation(Func<Task> operation, int maxRetries = 3)
+    private static async Task ProcessBatchUpdate(string jsonData)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(jsonData)) return;
+            
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+
+            var batchUpdate = JsonSerializer.Deserialize<BatchUpdate>(jsonData, options);
+            if (batchUpdate?.Devices == null || !batchUpdate.Devices.Any())
+            {
+                return;
+            }
+
+            lock (statesLock)
+            {
+                // Get the first device's state to apply to all dots
+                var firstDevice = batchUpdate.Devices.First().Value;
+                
+                // Update all dot states with the same values
+                foreach (var state in dotStates.Values)
+                {
+                    state.RGB[0] = (byte)firstDevice.RGB[0];
+                    state.RGB[1] = (byte)firstDevice.RGB[1];
+                    state.RGB[2] = (byte)firstDevice.RGB[2];
+                    state.UpdatePending = true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error processing batch update: {ex.Message}");
+        }
+    }
+
+    private static async Task RetryOperation(Func<Task> operation, int maxRetries)
     {
         for (int i = 0; i < maxRetries; i++)
         {
             try
             {
                 await operation();
-                return; // Success, exit
-            }
-            catch (TaskCanceledException)
-            {
-                if (i == maxRetries - 1) throw; // Last attempt
-                await Task.Delay(50 * (i + 1)); // Exponential backoff
+                return;
             }
             catch (Exception ex)
             {
                 if (i == maxRetries - 1) throw; // Last attempt
-                LogMessage($"Retry {i + 1}/{maxRetries}: {ex.Message}", ConsoleColor.Yellow);
+                Console.WriteLine($"Retry {i + 1}/{maxRetries}: {ex.Message}");
                 await Task.Delay(50 * (i + 1)); // Exponential backoff
             }
-        }
-    }
-
-    private static void PrintHeader()
-    {
-        Console.Clear();
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine("Datafeel OSC Bridge v1.0");
-        Console.WriteLine("-------------------------");
-        Console.ResetColor();
-    }
-
-    private static void PrintStatus()
-    {
-        lock (consoleLock)
-        {
-            var currentPos = Console.CursorTop;
-            Console.SetCursorPosition(0, Console.WindowHeight - 2);
-            Console.Write(new string(' ', Console.WindowWidth)); // Clear the line
-            Console.SetCursorPosition(0, Console.WindowHeight - 2);
-            Console.ForegroundColor = ConsoleColor.DarkCyan;
-            Console.Write("Devices:");
-            foreach (var state in dotStates.Values)
-            {
-                Console.Write($" RGB: ({state.RGB[0]}, {state.RGB[1]}, {state.RGB[2]}) | Vibration: {state.Vibration:F1}%");
-            }
-            Console.ResetColor();
-            Console.SetCursorPosition(0, currentPos);
-        }
-    }
-
-    private static void LogMessage(string message, ConsoleColor color = ConsoleColor.White)
-    {
-        lock (consoleLock)
-        {
-            Console.ForegroundColor = color;
-            Console.WriteLine(message);
-            Console.ResetColor();
         }
     }
 
@@ -650,13 +469,9 @@ class Program
             var port = OSC_PORT;
             oscReceiver = new OscReceiver(port);
             oscReceiver.Connect();
-
-            LogMessage($"OSC receiver listening on port {port}", ConsoleColor.Green);
         }
         catch (Exception ex)
         {
-            LogMessage($"Failed to initialize OSC: {ex.Message}", ConsoleColor.Red);
-            throw;
         }
     }
 }
