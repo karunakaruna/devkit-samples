@@ -1,0 +1,91 @@
+# Datafeel OSC Bridge Reference
+
+## OSC Address Patterns and Value Ranges
+
+### LED Control
+1. /datafeel/led/rgb
+   - Arguments: (int r, int g, int b)
+   - Range: 0-255 for each value
+   - Example OSC message: /datafeel/led/rgb 255 0 128
+
+2. /datafeel/led/mode
+   - Argument: (string mode)
+   - Values: "manual", "breathe"
+   - Example: /datafeel/led/mode manual
+
+### Vibration Control
+1. /datafeel/vibration/intensity
+   - Argument: (float intensity)
+   - Range: 0.0 to 1.0
+   - Example: /datafeel/vibration/intensity 0.75
+
+2. /datafeel/vibration/frequency
+   - Argument: (float frequency)
+   - Range: 0 to 250 Hz
+   - Example: /datafeel/vibration/frequency 150
+
+3. /datafeel/vibration/mode
+   - Argument: (string mode)
+   - Values: "manual", "library"
+   - Example: /datafeel/vibration/mode manual
+
+### Device Control
+1. /datafeel/device/select
+   - Argument: (int deviceId)
+   - Range: 1-4
+   - Example: /datafeel/device/select 1
+
+2. /datafeel/device/reset
+   - No arguments
+   - Example: /datafeel/device/reset
+
+## Sample Code for Sending OSC Messages
+
+### Python (using python-osc)
+```python
+from pythonosc import udp_client
+
+client = udp_client.SimpleUDPClient("127.0.0.1", 8000)
+
+# Set LED colors
+client.send_message("/datafeel/led/rgb", [255, 0, 128])
+
+# Set vibration
+client.send_message("/datafeel/vibration/intensity", 0.75)
+client.send_message("/datafeel/vibration/frequency", 150)
+```
+
+### Max/MSP
+```
+[udpsend 127.0.0.1 8000]
+[/datafeel/led/rgb 255 0 128]
+[/datafeel/vibration/intensity 0.75]
+```
+
+### TouchDesigner
+```python
+op('udp1').send('/datafeel/led/rgb', 255, 0, 128)
+op('udp1').send('/datafeel/vibration/intensity', 0.75)
+```
+
+## Debug Information Display
+
+The bridge application displays the following information in real-time:
+
+1. OSC Messages Received:
+   - Timestamp
+   - Address Pattern
+   - Arguments
+   - Source IP and Port
+
+2. Device Communication:
+   - Write Operations
+   - Read Operations
+   - Success/Failure Status
+   - Error Messages (if any)
+
+3. Device Status:
+   - Connected Devices
+   - Current Mode
+   - Current Values
+   - Temperature Readings

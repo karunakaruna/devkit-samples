@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Datafeel Device Tester</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1e1e1e;
+            color: #fff;
+        }
+        .control-panel {
+            background: #2d2d2d;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        h2 {
+            margin-top: 0;
+            color: #0288d1;
+        }
+        .button-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px;
+            border: none;
+            border-radius: 4px;
+            background: #424242;
+            color: white;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #616161;
+        }
+        .color-button {
+            height: 50px;
+        }
+        .red { background: #c62828; }
+        .green { background: #2e7d32; }
+        .blue { background: #1565c0; }
+        .yellow { background: #f9a825; }
+        .purple { background: #6a1b9a; }
+        .white { background: #eeeeee; color: #000; }
+        .status {
+            padding: 10px;
+            background: #333;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .slider-container {
+            margin: 20px 0;
+        }
+        .slider {
+            width: 100%;
+            margin: 10px 0;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="control-panel">
+        <h2>Device Selection</h2>
+        <div class="button-grid">
+            <button id="device1" onclick="selectDevice(1)">Device 1</button>
+            <button id="device2" onclick="selectDevice(2)">Device 2</button>
+            <button id="device3" onclick="selectDevice(3)">Device 3</button>
+            <button id="device4" onclick="selectDevice(4)">Device 4</button>
+        </div>
+    </div>
+
+    <div class="control-panel">
+        <h2>LED Controls</h2>
+        <div class="button-grid">
+            <button class="color-button red" onclick="setLedColor(255, 0, 0)">Red</button>
+            <button class="color-button green" onclick="setLedColor(0, 255, 0)">Green</button>
+            <button class="color-button blue" onclick="setLedColor(0, 0, 255)">Blue</button>
+            <button class="color-button yellow" onclick="setLedColor(255, 255, 0)">Yellow</button>
+            <button class="color-button purple" onclick="setLedColor(255, 0, 255)">Purple</button>
+            <button class="color-button white" onclick="setLedColor(255, 255, 255)">White</button>
+        </div>
+        <button onclick="turnOffLED()">Turn Off LED</button>
+    </div>
+
+    <div class="control-panel">
+        <h2>Vibration Controls</h2>
+        <div class="slider-container">
+            <label for="vibration">Vibration Intensity: <span id="vibrationValue">0</span></label>
+            <input type="range" id="vibration" class="slider" min="0" max="100" value="0" 
+                   oninput="updateVibrationValue(this.value)">
+        </div>
+        <button onclick="stopVibration()">Stop Vibration</button>
+    </div>
+
+    <div class="status" id="status">Status: Ready</div>
+
+    <script>
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        const reconnectDelay = 1000; // 1 second
+        const minUpdateInterval = 1000/30; // 30Hz max update rate
+        let lastUpdateTime = 0;
+        let lastMessageTime = {};
+        let pendingUpdates = new Map(); // Use Map for better performance
+        let animationFrameRequested = false;
+        
+        // Throttle settings for different message types
+        const messageThrottles = {
+            '/datafeel/vibration/intensity': 50, // 50ms = 20Hz for vibration
+            '/datafeel/led/rgb': 100, // 100ms = 10Hz for LED changes
+            '/datafeel/device/select': 200 // 200ms for device selection
+        };
+
+        function shouldSendMessage(address) {
+            const now = performance.now();
+            const lastTime = lastMessageTime[address] || 0;
+            const throttleTime = messageThrottles[address] || minUpdateInterval;
+            
+            if (now - lastTime >= throttleTime) {
+                lastMessageTime[address] = now;
+                return true;
+            }
+            return false;
+        }
+
+        function queueUpdate(address, args) {
+            // Only queue if it's different from the last queued value
+            const currentValue = JSON.stringify(args);
+            const lastValue = pendingUpdates.get(address);
+            
+            if (lastValue !== currentValue) {
+                pendingUpdates.set(address, currentValue);
+                
+                if (!animationFrameRequested) {
+                    animationFrameRequested = true;
+                    requestAnimationFrame(processPendingUpdates);
+                }
+            }
+        }
+
+        function processPendingUpdates() {
+            animationFrameRequested = false;
+            
+            if (pendingUpdates.size > 0 && ws?.readyState === WebSocket.OPEN) {
+                const now = performance.now();
+                
+                // Process each pending update
+                for (const [address, argsString] of pendingUpdates) {
+                    if (shouldSendMessage(address)) {
+                        const args = JSON.parse(argsString);
+                        ws.send(JSON.stringify({
+                            type: 'osc_message',
+                            address: address,
+                            args: args
+                        }));
+                    }
+                }
+                
+                // Clear processed messages
+                pendingUpdates.clear();
+            }
+            
+            // If there are still pending updates, schedule another frame
+            if (pendingUpdates.size > 0) {
+                animationFrameRequested = true;
+                requestAnimationFrame(processPendingUpdates);
+            }
+        }
+
+        // Debounced vibration update
+        let vibrationUpdateTimeout;
+        function updateVibrationValue(value) {
+            clearTimeout(vibrationUpdateTimeout);
+            
+            const normalizedValue = value / 100;
+            document.getElementById('vibrationValue').textContent = value;
+            
+            vibrationUpdateTimeout = setTimeout(() => {
+                queueUpdate('/datafeel/vibration/intensity', [normalizedValue]);
+            }, 16); // ~60fps
+        }
+
+        function stopVibration() {
+            clearTimeout(vibrationUpdateTimeout);
+            queueUpdate('/datafeel/vibration/intensity', [0]);
+            document.getElementById('vibration').value = 0;
+            document.getElementById('vibrationValue').textContent = '0';
+        }
+
+        // Debounced LED update
+        let ledUpdateTimeout;
+        function setLedColor(r, g, b) {
+            clearTimeout(ledUpdateTimeout);
+            
+            ledUpdateTimeout = setTimeout(() => {
+                queueUpdate('/datafeel/led/rgb', [r, g, b]);
+            }, 16); // ~60fps
+        }
+
+        function turnOffLED() {
+            clearTimeout(ledUpdateTimeout);
+            queueUpdate('/datafeel/led/rgb', [0, 0, 0]);
+        }
+
+        // Device selection doesn't need debouncing since it's not continuous
+        function selectDevice(deviceId) {
+            queueUpdate('/datafeel/device/select', [deviceId]);
+            document.querySelectorAll('.device-button').forEach(btn => {
+                btn.style.backgroundColor = btn.id === `device${deviceId}` ? '#4CAF50' : '#f44336';
+            });
+        }
+
+        function connectWebSocket() {
+            // Get WebSocket port from URL parameters, default to 8081 if not specified
+            const urlParams = new URLSearchParams(window.location.search);
+            const wsPort = urlParams.get('ws_port') || '8081';
+            
+            if (ws) {
+                ws.close();
+            }
+
+            ws = new WebSocket(`ws://localhost:${wsPort}/ws`);
+            
+            ws.onopen = () => {
+                updateStatus('Connected to server');
+                reconnectAttempts = 0;
+                // Select initial device
+                selectDevice(1);
+            };
+
+            ws.onclose = () => {
+                updateStatus('Disconnected from server');
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    updateStatus(`Connection lost. Reconnecting (attempt ${reconnectAttempts}/${maxReconnectAttempts})...`);
+                    setTimeout(connectWebSocket, reconnectDelay);
+                } else {
+                    updateStatus('Failed to connect to server after multiple attempts');
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateStatus('Error: Connection failed');
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                updateStatus('Received: ' + JSON.stringify(data));
+            };
+        }
+
+        function updateStatus(message) {
+            const status = document.getElementById('status');
+            status.textContent = 'Status: ' + message;
+            console.log(message);
+        }
+
+        // Start connection when page loads
+        connectWebSocket();
+    </script>
+</body>
+</html>
