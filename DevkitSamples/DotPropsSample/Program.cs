@@ -213,50 +213,72 @@ class OptimizedOSCReceiver
     {
         while (!programCts.Token.IsCancellationRequested)
         {
+            var tasks = new List<Task>();
+
             foreach (var dot in dots.Values)
             {
-                await Task.Run(async () =>
+                tasks.Add(Task.Run(async () =>
                 {
                     bool success = false;
                     int attempt = 0;
-                    int maxAttempts = 3; // Retry up to 3 times with increasing timeouts
+                    int maxAttempts = 3; // Retry up to 3 times
 
-                    while (!success && attempt < maxAttempts)
+                    while (!success && attempt < maxAttempts && !programCts.Token.IsCancellationRequested)
                     {
                         try
                         {
-                            int timeout = 250 * (attempt + 1); // Exponential backoff
+                            int timeout = 250 * (attempt + 1); // Increase timeout with each retry
                             using var writeCts = new CancellationTokenSource(timeout);
+                            using var readCts = new CancellationTokenSource(timeout);
 
-                            await manager.Write(dot, true, writeCts.Token);
-                            Console.WriteLine($"✔ Device {dot.Address} updated successfully.");
-                            
-                            success = true; // Mark as success if we get here
+                            // Write update
+                            await manager?.Write(dot, true);
+                            Console.WriteLine($"✅ Device {dot.Address} updated.");
+
+                            // Try to read data (but don't fail if it doesn't work)
+                            try
+                            {
+                                await manager?.Read(dot, readCts.Token);
+                                Console.WriteLine($"🌡 Device {dot.Address} Skin Temp: {dot.SkinTemperature}°C");
+                            }
+                            catch
+                            {
+                                // Ignore read failures
+                            }
+
+                            success = true;
                         }
                         catch (OperationCanceledException)
                         {
-                            Console.WriteLine($"⚠ Device {dot.Address} write timeout (Attempt {attempt + 1}). Retrying...");
+                            Console.WriteLine($"⚠ Device {dot.Address} timeout (Attempt {attempt + 1}/{maxAttempts})");
                         }
                         catch (Exception e)
                         {
-                            Console.WriteLine($"❌ Device {dot.Address} failed: {e.Message}");
-                            break; // Exit retry loop on non-timeout errors
+                            Console.WriteLine($"❌ Device {dot.Address} error: {e.Message}");
+                            // Don't break, let it retry
                         }
 
                         attempt++;
+                        if (!success && attempt < maxAttempts)
+                        {
+                            await Task.Delay(50); // Small delay between retries
+                        }
                     }
-
-                    // Small delay between device writes to prevent bus congestion
-                    await Task.Delay(10);
-                });
+                }));
             }
 
-            // Wait a bit before next batch update
-            await Task.Delay(20);
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            catch
+            {
+                // Ignore any task failures
+            }
+
+            await Task.Delay(100); // Delay between update cycles
         }
     }
-
-
 
     private class BatchUpdate
     {
