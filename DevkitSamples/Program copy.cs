@@ -327,10 +327,6 @@ class Program
         }
     }
 
-    private static readonly TimeSpan writeDelayMs = TimeSpan.FromMilliseconds(50); // Minimum delay between writes to same device
-    private static readonly Dictionary<int, DateTime> lastWriteTimes = new();
-    private static readonly int maxRetries = 2;
-
     private static async Task StartDeviceUpdateLoop()
     {
         if (manager == null) return;
@@ -338,6 +334,9 @@ class Program
         await InitializeDots();
         Console.WriteLine("Device update loop started");
 
+        var writeDelayMs = 50; // Delay between writes to same device
+        var lastWriteTimes = new Dictionary<int, DateTime>();
+        
         while (isRunning)
         {
             try
@@ -353,7 +352,7 @@ class Program
                             State: s,
                             LastWrite: lastWriteTimes.TryGetValue(s.Props.Address, out var time) ? time : DateTime.MinValue
                         ))
-                        .Where(x => (currentTime - x.LastWrite) >= writeDelayMs)
+                        .Where(x => (currentTime - x.LastWrite).TotalMilliseconds >= writeDelayMs)
                         .ToList();
                 }
 
@@ -376,6 +375,7 @@ class Program
                         // Write with retry
                         var success = false;
                         var retryCount = 0;
+                        var maxRetries = 2;
 
                         while (!success && retryCount < maxRetries)
                         {
@@ -386,17 +386,15 @@ class Program
                                 {
                                     success = true;
                                     lastWriteTimes[state.Props.Address] = currentTime;
-                                    state.UpdatePending = false;
                                 }
                             }
-                            catch (Exception ex)
+                            catch (Exception)
                             {
                                 retryCount++;
                                 if (retryCount < maxRetries)
                                 {
-                                    await Task.Delay(20); // Short delay between retries
+                                    Thread.Sleep(20); // Short delay between retries
                                 }
-                                Console.WriteLine($"Write attempt {retryCount} failed for dot {state.Props.Address}: {ex.Message}");
                             }
                         }
 
@@ -407,11 +405,16 @@ class Program
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Error processing dot {state.Props.Address}: {ex.Message}");
+                        Console.WriteLine($"Error writing to dot {state.Props.Address}: {ex.Message}");
+                    }
+
+                    lock (statesLock)
+                    {
+                        state.UpdatePending = false;
                     }
                 }
 
-                await Task.Delay(20); // Base loop delay
+                await Task.Delay(10); // Main loop delay
             }
             catch (Exception ex)
             {
