@@ -185,18 +185,26 @@ class Program
                     }
                 });
 
-                if (await Task.WhenAny(receiveTask, Task.Delay(100)) == receiveTask)
+                if (await Task.WhenAny(receiveTask, Task.Delay(frameInterval)) == receiveTask)
                 {
                     var packet = await receiveTask;
                     if (packet != null)
                     {
-                        messageQueue.Enqueue(packet);
+                        if (messageQueue.Count < MAX_QUEUE_SIZE)
+                        {
+                            messageQueue.Enqueue(packet);
+                        }
+                        else
+                        {
+                            Console.WriteLine("Message queue overflow, discarding packet");
+                        }
                         await ProcessMessageQueue();
                     }
                 }
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"Error processing messages: {ex.Message}");
             }
         }
     }
@@ -382,7 +390,7 @@ class Program
                             try 
                             {
                                 var writeTask = manager.Write(state.Props, false);
-                                if (writeTask.Wait(100)) // 100ms timeout
+                                if (writeTask.Wait(deviceTimeout)) // Device timeout
                                 {
                                     success = true;
                                     lastWriteTimes[state.Props.Address] = currentTime;
