@@ -18,8 +18,8 @@ class Program
     private static CancellationTokenSource? updateLoopCts;
     private static readonly Dictionary<int, DotState> dotStates = new();
     private static readonly object statesLock = new();
-    private static TimeSpan frameInterval = TimeSpan.FromSeconds(1.0 / 60.0); // 60 FPS
-    private static readonly TimeSpan deviceTimeout = TimeSpan.FromMilliseconds(250);
+    private static TimeSpan frameInterval = TimeSpan.FromSeconds(1.0 / 30.0); // 30 FPS
+    private static readonly TimeSpan deviceTimeout = TimeSpan.FromMilliseconds(100);
     private static readonly ConcurrentQueue<OscPacket> messageQueue = new();
     private static readonly SemaphoreSlim processingThrottle = new(1);
     private static readonly TimeSpan messageProcessInterval = TimeSpan.FromMilliseconds(1); // Process messages as fast as possible
@@ -30,6 +30,9 @@ class Program
     private static readonly object consoleLock = new();
     private const int OSC_PORT = 9001;
     private const int CONNECTION_TIMEOUT = 60000;
+    private static readonly Dictionary<int, DateTime> lastUpdateAttempts = new();
+    private static readonly TimeSpan minUpdateInterval = TimeSpan.FromMilliseconds(33); // ~30fps max per device
+    private static readonly Dictionary<int, int> updateCount = new();
 
     private class DotState
     {
@@ -265,37 +268,13 @@ class Program
 
         try
         {
+            Console.WriteLine($"Processing OSC message: {message.Address}");
+            
             if (message.Address == "/datafeel/batch_update" && message.Count >= 1)
             {
                 var jsonData = message[0].ToString();
-                if (jsonData == null)
-                {
-                    return;
-                }
-
+                if (jsonData == null) return;
                 await ProcessBatchUpdate(jsonData);
-            }
-            else if (message.Address == "/datafeel/device/select" && message.Count >= 1)
-            {
-                if (!int.TryParse(message[0].ToString(), out int deviceId))
-                {
-                    return;
-                }
-
-                var newDot = manager.Dots.FirstOrDefault(d => d.Address == deviceId);
-                if (newDot != null)
-                {
-                    lock (statesLock)
-                    {
-                        if (!dotStates.ContainsKey(deviceId))
-                        {
-                            dotStates[deviceId] = new DotState();
-                        }
-                    }
-                }
-                else
-                {
-                }
             }
             else if (message.Address == "/datafeel/led/rgb" && message.Count >= 3)
             {
@@ -303,6 +282,7 @@ class Program
                     !float.TryParse(message[1].ToString(), out float g) ||
                     !float.TryParse(message[2].ToString(), out float b))
                 {
+                    Console.WriteLine($"Failed to parse RGB values from: {message[0]}, {message[1]}, {message[2]}");
                     return;
                 }
 
@@ -310,34 +290,76 @@ class Program
                 byte gByte = (byte)Math.Round(Math.Max(0, Math.Min(255, g)));
                 byte bByte = (byte)Math.Round(Math.Max(0, Math.Min(255, b)));
 
+                Console.WriteLine($"Setting RGB values: ({rByte},{gByte},{bByte})");
+
                 lock (statesLock)
                 {
-                    foreach (var state in dotStates.Values)
+                    foreach (var state in dotStates.Values.Where(s => s.Props != null))
                     {
                         state.RGB[0] = rByte;
                         state.RGB[1] = gByte;
                         state.RGB[2] = bByte;
                         state.UpdatePending = true;
+                        Console.WriteLine($"Queued RGB update for Device {state.Props.Address}");
                     }
                 }
             }
-            else if (message.Address == "/datafeel/vibration/intensity")
+            else if (message.Address == "/datafeel/vibration/intensity" || 
+                     message.Address == "/datafeel/vibration/frequency")
             {
-                await HandleVibrationMessage(message);
-            }
-            else if (message.Address == "/datafeel/vibration/frequency")
-            {
-                await HandleFrequencyMessage(message);
+                if (message.Count < 1 || !float.TryParse(message[0].ToString(), out float value))
+                {
+                    Console.WriteLine($"Failed to parse value from: {message[0]}");
+                    return;
+                }
+
+                Console.WriteLine($"Setting {message.Address} value: {value}");
+
+                lock (statesLock)
+                {
+                    foreach (var state in dotStates.Values.Where(s => s.Props != null))
+                    {
+                        if (message.Address == "/datafeel/vibration/intensity")
+                        {
+                            state.VibrationIntensity = Math.Max(0, Math.Min(1, value));
+                            Console.WriteLine($"Queued vibration intensity update for Device {state.Props.Address}: {state.VibrationIntensity}");
+                        }
+                        else
+                        {
+                            state.VibrationFrequency = Math.Max(0, Math.Min(255, value));
+                            Console.WriteLine($"Queued vibration frequency update for Device {state.Props.Address}: {state.VibrationFrequency}");
+                        }
+                        state.UpdatePending = true;
+                    }
+                }
             }
         }
         catch (Exception ex)
         {
+            Console.WriteLine($"Error processing message {message.Address}: {ex.Message}");
         }
     }
 
-    private static readonly TimeSpan writeDelayMs = TimeSpan.FromMilliseconds(50); // Minimum delay between writes to same device
-    private static readonly Dictionary<int, DateTime> lastWriteTimes = new();
-    private static readonly int maxRetries = 2;
+    private static void LogDeviceStatus()
+    {
+        lock (statesLock)
+        {
+            Console.WriteLine("\n=== Device Status ===");
+            foreach (var state in dotStates)
+            {
+                var lastUpdateText = lastUpdateAttempts.TryGetValue(state.Key, out var time) 
+                    ? $"{(DateTime.UtcNow - time).TotalMilliseconds:F1}ms ago" 
+                    : "never";
+                    
+                Console.WriteLine(
+                    $"Device {state.Key}: " +
+                    $"UpdatePending={state.Value.UpdatePending}, " +
+                    $"RGB=({state.Value.RGB[0]},{state.Value.RGB[1]},{state.Value.RGB[2]}), " +
+                    $"LastUpdate={lastUpdateText}");
+            }
+            Console.WriteLine("==================\n");
+        }
+    }
 
     private static async Task StartDeviceUpdateLoop()
     {
@@ -345,31 +367,42 @@ class Program
 
         await InitializeDots();
         Console.WriteLine("Device update loop started");
-
+        
         while (isRunning)
         {
             try
             {
-                var currentTime = DateTime.Now;
-                List<(DotState State, DateTime LastWrite)> statesToUpdate;
+                var currentTime = DateTime.UtcNow;
+                var devicesToUpdate = new List<DotState>();
                 
                 lock (statesLock)
                 {
-                    statesToUpdate = dotStates.Values
-                        .Where(s => s.UpdatePending && s.Props != null)
-                        .Select(s => (
-                            State: s,
-                            LastWrite: lastWriteTimes.TryGetValue(s.Props.Address, out var time) ? time : DateTime.MinValue
-                        ))
-                        .Where(x => (currentTime - x.LastWrite) >= writeDelayMs)
-                        .ToList();
+                    foreach (var state in dotStates.Values.Where(s => s.Props != null))
+                    {
+                        if (!state.UpdatePending) 
+                        {
+                            Console.WriteLine($"Device {state.Props.Address} skipped - no update pending");
+                            continue;
+                        }
+                        
+                        if (!lastUpdateAttempts.TryGetValue(state.Props.Address, out var lastAttempt) ||
+                            (currentTime - lastAttempt) >= minUpdateInterval)
+                        {
+                            devicesToUpdate.Add(state);
+                            Console.WriteLine($"Device {state.Props.Address} queued for update");
+                        }
+                        else
+                        {
+                            var timeSinceLastUpdate = (currentTime - lastAttempt).TotalMilliseconds;
+                            Console.WriteLine($"Device {state.Props.Address} skipped - too soon since last update ({timeSinceLastUpdate:F1}ms)");
+                        }
+                    }
                 }
 
-                foreach (var (state, _) in statesToUpdate)
+                foreach (var state in devicesToUpdate)
                 {
                     try
                     {
-                        // Update LED
                         if (state.Props.GlobalLed != null)
                         {
                             state.Props.GlobalLed.Red = state.RGB[0];
@@ -377,75 +410,78 @@ class Program
                             state.Props.GlobalLed.Blue = state.RGB[2];
                         }
                         
-                        // Update vibration
                         state.Props.VibrationIntensity = (byte)(state.VibrationIntensity * 255);
                         state.Props.VibrationFrequency = (byte)state.VibrationFrequency;
 
-                        // Write with retry
-                        var success = false;
-                        var retryCount = 0;
+                        var deviceId = state.Props.Address;
+                        lastUpdateAttempts[deviceId] = currentTime;
 
-                        while (!success && retryCount < maxRetries)
+                        _ = Task.Run(async () =>
                         {
-                            try 
+                            try
                             {
-                                var writeTask = manager.Write(state.Props, false);
-                                if (writeTask.Wait(deviceTimeout)) // Device timeout
+                                using var cts = new CancellationTokenSource(deviceTimeout);
+                                await manager.Write(state.Props, fireAndForget: true, cts.Token);
+                                
+                                lock (statesLock)
                                 {
-                                    success = true;
-                                    lastWriteTimes[state.Props.Address] = currentTime;
+                                    if (!updateCount.ContainsKey(deviceId))
+                                        updateCount[deviceId] = 0;
+                                    updateCount[deviceId]++;
+                                    
                                     state.UpdatePending = false;
                                 }
+                                
+                                Console.WriteLine($"Successfully updated Device {deviceId} (Total updates: {updateCount[deviceId]})");
                             }
                             catch (Exception ex)
                             {
-                                retryCount++;
-                                if (retryCount < maxRetries)
-                                {
-                                    await Task.Delay(20); // Short delay between retries
-                                }
-                                Console.WriteLine($"Write attempt {retryCount} failed for dot {state.Props.Address}: {ex.Message}");
+                                Console.WriteLine($"Failed to update Device {deviceId}: {ex.Message}");
                             }
-                        }
-
-                        if (!success)
-                        {
-                            Console.WriteLine($"Failed to write to dot {state.Props.Address} after {maxRetries} attempts");
-                        }
+                        });
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Error processing dot {state.Props.Address}: {ex.Message}");
+                        Console.WriteLine($"Error preparing update for Device {state.Props.Address}: {ex.Message}");
                     }
                 }
 
-                await Task.Delay(20); // Base loop delay
+                if (currentTime.Second % 5 == 0) // Log status every 5 seconds
+                {
+                    LogDeviceStatus();
+                }
+
+                await Task.Delay(frameInterval);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error in device update loop: {ex.Message}");
-                await Task.Delay(100);
+                Console.WriteLine($"Error in update loop: {ex.Message}");
+                await Task.Delay(frameInterval);
             }
         }
     }
 
     private static async Task InitializeDots()
     {
+        Console.WriteLine("Initializing dots...");
         foreach (var dot in manager.Dots)
         {
-            var props = new DotPropsWritable() 
+            Console.WriteLine($"Initializing Device {dot.Address}");
+            var props = new DotPropsWritable 
             { 
                 Address = dot.Address,
-                LedMode = LedModes.GlobalManual,
                 GlobalLed = new(),
+                LedMode = LedModes.GlobalManual,
                 VibrationMode = VibrationModes.Manual,
                 VibrationIntensity = 0,
                 VibrationFrequency = 150
             };
-
-            var state = new DotState { Props = props };
-            dotStates[dot.Address] = state;
+            
+            dotStates[dot.Address] = new DotState { Props = props };
+            Console.WriteLine($"Device {dot.Address} initialized with props: " +
+                $"LED Mode={props.LedMode}, Vib Mode={props.VibrationMode}");
         }
+        Console.WriteLine($"Initialized {dotStates.Count} devices");
     }
 
     private static async Task ProcessBatchUpdate(string jsonData)
