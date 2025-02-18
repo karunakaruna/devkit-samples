@@ -11,12 +11,27 @@ class OptimizedOSCReceiver
 {
     private static DotManager? manager;
     private static readonly ConcurrentDictionary<int, DotPropsWritable> dots = new();
+    private static readonly ConcurrentDictionary<string, (byte Red, byte Green, byte Blue)> lastKnownStates = new();
+    private static readonly ConcurrentDictionary<string, DateTime> lastUpdateTimes = new();
+    private static readonly ConcurrentDictionary<int, Queue<(byte R, byte G, byte B)>> oscUpdateQueues = new();
+    private static readonly ConcurrentDictionary<int, DateTime> lastOscUpdateTimes = new();
+    private static readonly ConcurrentDictionary<int, (int UpdateCount, int ErrorCount, bool IsConnected)> deviceStats = new();
+    private static readonly Stopwatch uptime = new();
+    private static DateTime lastConsoleUpdate = DateTime.UtcNow;
+    private static DateTime lastOscMessage = DateTime.MinValue;
+    private static int totalOscMessages = 0;
+    private const int ConsoleUpdateIntervalMs = 100;
     private static readonly CancellationTokenSource programCts = new();
     private static OscReceiver? oscReceiver;
     private const int OSC_PORT = 9001;
+    private const int MinUpdateIntervalMs = 33; // ~30fps max update rate
+    private const int ColorChangeThreshold = 5; // Only update if color changes by more than this
+    private const int OscUpdateIntervalMs = 200; // Process OSC updates every 200ms
+    private const int MaxQueueSize = 20; // Keep last 20 updates for smoothing
 
     static async Task Main(string[] args)
     {
+        uptime.Start();
         Console.CancelKeyPress += (s, e) => {
             e.Cancel = true;
             programCts.Cancel();
@@ -174,6 +189,9 @@ class OptimizedOSCReceiver
 
                 while (oscReceiver.TryReceive(out OscPacket? packet))
                 {
+                    lastOscMessage = DateTime.UtcNow;
+                    totalOscMessages++;
+                    
                     if (packet is OscMessage msg && msg.Address == "/datafeel/batch_update" && msg.Count > 0 && msg[0] is string json)
                     {
                         try
@@ -185,28 +203,136 @@ class OptimizedOSCReceiver
                                 {
                                     if (int.TryParse(device.Key, out int deviceId) && dots.ContainsKey(deviceId))
                                     {
-                                        var dot = dots[deviceId];
-                                        dot.GlobalLed.Red = (byte)device.Value.RGB[0];
-                                        dot.GlobalLed.Green = (byte)device.Value.RGB[1];
-                                        dot.GlobalLed.Blue = (byte)device.Value.RGB[2];
-                                        dot.VibrationIntensity = device.Value.Vibration;
-                                        dot.VibrationFrequency = device.Value.Frequency;
+                                        if (!oscUpdateQueues.ContainsKey(deviceId))
+                                        {
+                                            oscUpdateQueues[deviceId] = new Queue<(byte R, byte G, byte B)>();
+                                        }
 
-                                        Console.WriteLine($"🔵 OSC Update: Device {deviceId} - RGB: {dot.GlobalLed.Red},{dot.GlobalLed.Green},{dot.GlobalLed.Blue}");
+                                        var queue = oscUpdateQueues[deviceId];
+                                        
+                                        queue.Enqueue(((byte)device.Value.RGB[0], 
+                                                     (byte)device.Value.RGB[1], 
+                                                     (byte)device.Value.RGB[2]));
+                                        
+                                        while (queue.Count > MaxQueueSize)
+                                        {
+                                            queue.Dequeue();
+                                        }
+
+                                        if (!lastOscUpdateTimes.TryGetValue(deviceId, out var lastUpdate) ||
+                                            (DateTime.UtcNow - lastUpdate).TotalMilliseconds >= OscUpdateIntervalMs)
+                                        {
+                                            var smoothedColors = SmoothColors(queue);
+                                            var dot = dots[deviceId];
+                                            
+                                            dot.GlobalLed.Red = smoothedColors.R;
+                                            dot.GlobalLed.Green = smoothedColors.G;
+                                            dot.GlobalLed.Blue = smoothedColors.B;
+                                            dot.VibrationIntensity = device.Value.Vibration;
+                                            dot.VibrationFrequency = device.Value.Frequency;
+
+                                            try 
+                                            {
+                                                await manager?.Write(dot, true);
+                                                UpdateDeviceStat(deviceId, isConnected: true, isUpdate: true);
+                                            }
+                                            catch (Exception)
+                                            {
+                                                UpdateDeviceStat(deviceId, isConnected: false, isError: true);
+                                            }
+
+                                            lastOscUpdateTimes[deviceId] = DateTime.UtcNow;
+                                        }
                                     }
                                 }
                             }
                         }
                         catch (JsonException) { }
                     }
+                    UpdateConsole();
                 }
+
+                await Task.Delay(10);
             }
             catch (Exception e)
             {
-                Console.WriteLine($"OSC processing error: {e.Message}");
+                Console.WriteLine($"OSC Error: {e.Message}");
                 await Task.Delay(100);
             }
         }
+    }
+
+    private static (byte R, byte G, byte B) SmoothColors(Queue<(byte R, byte G, byte B)> updates)
+    {
+        if (updates.Count == 0) return (0, 0, 0);
+        
+        // Use exponential moving average for smoother transitions
+        double alpha = 0.3; // Smoothing factor
+        var first = updates.Peek();
+        double r = first.R, g = first.G, b = first.B;
+        
+        foreach (var update in updates.Skip(1))
+        {
+            r = alpha * update.R + (1 - alpha) * r;
+            g = alpha * update.G + (1 - alpha) * g;
+            b = alpha * update.B + (1 - alpha) * b;
+        }
+        
+        return ((byte)r, (byte)g, (byte)b);
+    }
+
+    private static byte RoundToBucket(byte value)
+    {
+        // Round to nearest multiple of threshold to reduce noise
+        return (byte)(Math.Round(value / (double)ColorChangeThreshold) * ColorChangeThreshold);
+    }
+
+    private static bool HasStateChanged(string address, DotPropsWritable dot)
+    {
+        // Round the incoming values to reduce noise
+        byte newRed = RoundToBucket(dot.GlobalLed.Red);
+        byte newGreen = RoundToBucket(dot.GlobalLed.Green);
+        byte newBlue = RoundToBucket(dot.GlobalLed.Blue);
+
+        if (!lastKnownStates.TryGetValue(address, out var lastState))
+        {
+            lastKnownStates[address] = (newRed, newGreen, newBlue);
+            return true;
+        }
+
+        // Check if any color component has changed by more than the threshold
+        bool changed = Math.Abs(lastState.Red - newRed) >= ColorChangeThreshold ||
+                      Math.Abs(lastState.Green - newGreen) >= ColorChangeThreshold ||
+                      Math.Abs(lastState.Blue - newBlue) >= ColorChangeThreshold;
+
+        if (changed)
+        {
+            lastKnownStates[address] = (newRed, newGreen, newBlue);
+            // Update the actual LED values to match our rounded values
+            dot.GlobalLed.Red = newRed;
+            dot.GlobalLed.Green = newGreen;
+            dot.GlobalLed.Blue = newBlue;
+        }
+
+        return changed;
+    }
+
+    private static bool ShouldUpdateDevice(string address)
+    {
+        var now = DateTime.UtcNow;
+        if (!lastUpdateTimes.TryGetValue(address, out var lastUpdate))
+        {
+            lastUpdateTimes[address] = now;
+            return true;
+        }
+
+        if ((now - lastUpdate).TotalMilliseconds < MinUpdateIntervalMs)
+        {
+            return false;
+        }
+
+        lastUpdateTimes[address] = now;
+        return true;
     }
 
     private static async Task UpdateDevices()
@@ -217,25 +343,35 @@ class OptimizedOSCReceiver
 
             foreach (var dot in dots.Values)
             {
+                // Skip if we're updating too frequently
+                if (!ShouldUpdateDevice(dot.Address.ToString()))
+                {
+                    continue;
+                }
+
                 tasks.Add(Task.Run(async () =>
                 {
+                    // Skip if state hasn't changed
+                    if (!HasStateChanged(dot.Address.ToString(), dot))
+                    {
+                        return;
+                    }
+
                     bool success = false;
                     int attempt = 0;
-                    int maxAttempts = 3; // Retry up to 3 times
+                    int maxAttempts = 3;
 
                     while (!success && attempt < maxAttempts && !programCts.Token.IsCancellationRequested)
                     {
                         try
                         {
-                            int timeout = 250 * (attempt + 1); // Increase timeout with each retry
+                            int timeout = 250 * (attempt + 1);
                             using var writeCts = new CancellationTokenSource(timeout);
                             using var readCts = new CancellationTokenSource(timeout);
 
-                            // Write update
                             await manager?.Write(dot, true);
-                            Console.WriteLine($"✅ Device {dot.Address} updated.");
+                            Console.WriteLine($"✅ Device {dot.Address} LED updated to R:{dot.GlobalLed.Red} G:{dot.GlobalLed.Green} B:{dot.GlobalLed.Blue}");
 
-                            // Try to read data (but don't fail if it doesn't work)
                             try
                             {
                                 await manager?.Read(dot, readCts.Token);
@@ -251,17 +387,20 @@ class OptimizedOSCReceiver
                         catch (OperationCanceledException)
                         {
                             Console.WriteLine($"⚠ Device {dot.Address} timeout (Attempt {attempt + 1}/{maxAttempts})");
+                            IncrementDeviceStat(dot.Address, true);
+                            UpdateConsole();
                         }
                         catch (Exception e)
                         {
                             Console.WriteLine($"❌ Device {dot.Address} error: {e.Message}");
-                            // Don't break, let it retry
+                            IncrementDeviceStat(dot.Address, true);
+                            UpdateConsole();
                         }
 
                         attempt++;
                         if (!success && attempt < maxAttempts)
                         {
-                            await Task.Delay(50); // Small delay between retries
+                            await Task.Delay(50);
                         }
                     }
                 }));
@@ -276,8 +415,75 @@ class OptimizedOSCReceiver
                 // Ignore any task failures
             }
 
-            await Task.Delay(100); // Delay between update cycles
+            await Task.Delay(MinUpdateIntervalMs); // Ensure we don't exceed max frame rate
         }
+    }
+
+    private static void UpdateConsole()
+    {
+        var now = DateTime.UtcNow;
+        if ((now - lastConsoleUpdate).TotalMilliseconds < ConsoleUpdateIntervalMs)
+        {
+            return;
+        }
+        lastConsoleUpdate = now;
+
+        Console.Clear();
+        Console.WriteLine($"DataFeel Performance Monitor - Uptime: {uptime.Elapsed:hh\\:mm\\:ss}");
+        Console.WriteLine("═══════════════════════════════════════════════════");
+        
+        // OSC Status
+        var oscStatus = (now - lastOscMessage).TotalMilliseconds < 1000 ? "🟢" : "🔴";
+        Console.WriteLine($"OSC Status: {oscStatus} Port: {OSC_PORT} | Messages: {totalOscMessages} | Last Message: {(now - lastOscMessage).TotalMilliseconds:F0}ms ago");
+        Console.WriteLine($"Settings: Update Rate: {OscUpdateIntervalMs}ms | Smoothing Window: {MaxQueueSize} samples");
+        Console.WriteLine("───────────────────────────────────────────────────");
+        Console.WriteLine("Device Status:");
+
+        foreach (var deviceId in dots.Keys.OrderBy(k => k))
+        {
+            if (!deviceStats.TryGetValue(deviceId, out var stats))
+            {
+                stats = (0, 0, false);
+            }
+
+            var dot = dots[deviceId];
+            var lastUpdate = lastOscUpdateTimes.TryGetValue(deviceId, out var time) 
+                ? (DateTime.UtcNow - time).TotalMilliseconds 
+                : double.MaxValue;
+
+            var status = stats.IsConnected ? "🟢" : "🔴";
+            var updateStatus = lastUpdate < 1000 ? "✓" : "⨯";
+            
+            Console.WriteLine($"{status} Device {deviceId}: RGB({dot.GlobalLed.Red,3},{dot.GlobalLed.Green,3},{dot.GlobalLed.Blue,3}) " +
+                          $"| Updates: {stats.UpdateCount,6} {updateStatus} | Errors: {stats.ErrorCount,4} | Last Update: {(lastUpdate == double.MaxValue ? "Never" : $"{lastUpdate:F0}ms")}");
+        }
+
+        Console.WriteLine("───────────────────────────────────────────────────");
+        Console.WriteLine("Press Ctrl+C to exit");
+    }
+
+    private static void UpdateDeviceStat(int deviceId, bool? isConnected = null, bool isError = false, bool isUpdate = false)
+    {
+        deviceStats.AddOrUpdate(
+            deviceId,
+            isError ? (0, 1, isConnected ?? false) : (1, 0, isConnected ?? false),
+            (_, stats) => 
+            {
+                var updates = isUpdate ? stats.UpdateCount + 1 : stats.UpdateCount;
+                var errors = isError ? stats.ErrorCount + 1 : stats.ErrorCount;
+                var connected = isConnected ?? stats.IsConnected;
+                return (updates, errors, connected);
+            }
+        );
+    }
+
+    private static void IncrementDeviceStat(int deviceId, bool isError = false)
+    {
+        deviceStats.AddOrUpdate(
+            deviceId,
+            isError ? (0, 1, false) : (1, 0, false),
+            (_, stats) => isError ? (stats.UpdateCount, stats.ErrorCount + 1, false) : (stats.UpdateCount + 1, stats.ErrorCount, false)
+        );
     }
 
     private class BatchUpdate
