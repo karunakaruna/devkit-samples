@@ -46,15 +46,43 @@ class OptimizedOSCReceiver
         // Start Modbus Communication
         try
         {
-            using var startCts = new CancellationTokenSource(5000);
-            var serialClient = new DatafeelModbusClientConfiguration()
-                .UseWindowsSerialPortTransceiver()
+            var bleClient = new DatafeelModbusClientConfiguration()
+                .UseNetBleTransceiver()
                 .CreateClient();
 
-            var result = await manager.Start(new List<DatafeelModbusClient> { serialClient }, startCts.Token);
-            if (!result)
+            Console.WriteLine("Initializing BLE client and scanning for devices...");
+            try 
             {
-                Console.WriteLine("❌ Failed to connect to DataFeel devices.");
+                using var startCts = new CancellationTokenSource(10000);
+                var result = await manager.Start(new List<DatafeelModbusClient> { bleClient }, startCts.Token);
+                if (result)
+                {
+                    Console.WriteLine("BLE client started successfully");
+                    if (manager.Dots != null)
+                    {
+                        foreach (var dot in manager.Dots)
+                        {
+                            if (dot != null)
+                            {
+                                Console.WriteLine($"Found DOT device: Address={dot.Address}");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("No DOT devices found in manager.Dots");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("Failed to start BLE client");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"BLE Error: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
                 return;
             }
 
