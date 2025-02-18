@@ -8,23 +8,22 @@ DevkitSamples\OscBridge\touchdesigner\osc-bridge.toe
 
 
 
-Bridge Prototype 1 -
+**Bridge Prototype 1 -**
     - cd into DevkitSamples\OscBridge
-    - dotnet restore
-    - dotnet build
-    - dotnet run    
-    
+        - dotnet restore
+        - dotnet build
+        - dotnet run    
+
 or
 
     win
         DevkitSamples\OscBridge\start_bridge.bat
 
-
-Bridge Prototype 2 - 
+**Bridge Prototype 2 - **
     - cd into DevkitSamples\DotPropsSample
-    - dotnet restore
-    - dotnet build
-    - dotnet run
+        - dotnet restore
+        - dotnet build
+        - dotnet run
 
 
 win
@@ -33,6 +32,16 @@ osx
     DevkitSamples\DotPropsSample\bin\Release\net8.0\osx-x64\publish\DotPropsSample (untested)
 
     "On the Mac, you'll need to make it executable using the command chmod +x DotPropsSample before running it" 
+
+
+
+Issues:
+
+​	Both versions have trouble updating all devices consistently. 
+
+​	Vibration seems to introduce extra frame-dropping.
+
+
 
 
 
