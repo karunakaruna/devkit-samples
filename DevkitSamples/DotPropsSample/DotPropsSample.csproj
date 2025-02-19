@@ -1,17 +1,49 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
     <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <RuntimeIdentifiers>osx-x64;osx-arm64</RuntimeIdentifiers>
+    
+    <!-- Basic settings -->
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <SelfContained>true</SelfContained>
+    
+    <!-- Disable features that might cause issues -->
+    <PublishSingleFile>false</PublishSingleFile>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <TieredCompilation>false</TieredCompilation>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    
+    <!-- Native library handling -->
+    <UseAppHost>true</UseAppHost>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    
+    <!-- Additional debugging -->
+    <DebugType>portable</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    
+    <!-- Runtime configuration -->
+    <RollForward>Major</RollForward>
+    <StripSymbols>false</StripSymbols>
   </PropertyGroup>
 
+  <!-- Explicit package references with version constraints -->
   <ItemGroup>
-    <PackageReference Include="Datafeel" Version="2.0.2-alpha" />
-    <PackageReference Include="Datafeel.NET.BLE" Version="2.0.2-alpha" />
-    <PackageReference Include="Datafeel.NET.Serial" Version="2.0.2-alpha" />
+    <PackageReference Include="Datafeel" Version="2.0.2-alpha" ExcludeAssets="runtime" />
+    <PackageReference Include="Datafeel.NET.BLE" Version="2.0.2-alpha" ExcludeAssets="runtime" />
+    <PackageReference Include="Datafeel.NET.Serial" Version="2.0.2-alpha" ExcludeAssets="runtime" />
     <PackageReference Include="Rug.Osc" Version="1.2.5" />
+  </ItemGroup>
+
+  <!-- Ensure native libraries are copied -->
+  <ItemGroup>
+    <Content Include="$(OutDir)*.dylib" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

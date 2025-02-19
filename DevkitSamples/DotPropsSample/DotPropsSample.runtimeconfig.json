@@ -1,0 +1,18 @@
+{
+  "runtimeOptions": {
+    "tfm": "net8.0",
+    "framework": {
+      "name": "Microsoft.NETCore.App",
+      "version": "8.0.0"
+    },
+    "configProperties": {
+      "System.GC.Server": false,
+      "System.Runtime.TieredCompilation": false,
+      "System.Globalization.Invariant": true,
+      "System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization": false,
+      "System.Runtime.InteropServices.BuiltInComInterop.IsSupported": false,
+      "System.Threading.ThreadPool.MinThreads": 4,
+      "System.Threading.ThreadPool.MaxThreads": 25
+    }
+  }
+}
